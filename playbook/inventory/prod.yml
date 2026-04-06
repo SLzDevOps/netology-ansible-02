@@ -2,4 +2,13 @@
 clickhouse:
   hosts:
     clickhouse-01:
-      ansible_host: <IP_here>
+      ansible_host: 192.168.230.128
+      ansible_user: avfomichev
+      ansible_become: true
+
+vector:
+  hosts:
+    vector-01:
+      ansible_host: 192.168.230.128
+      ansible_user: avfomichev
+      ansible_become: true

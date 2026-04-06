@@ -1,36 +1,132 @@
 ---
+# Play 1: Установка Clickhouse
 - name: Install Clickhouse
   hosts: clickhouse
   handlers:
     - name: Start clickhouse service
       become: true
-      ansible.builtin.service:
+      ansible.builtin.systemd:
         name: clickhouse-server
         state: restarted
+        daemon_reload: true
   tasks:
-    - block:
-        - name: Get clickhouse distrib
-          ansible.builtin.get_url:
-            url: "https://packages.clickhouse.com/rpm/stable/{{ item }}-{{ clickhouse_version }}.noarch.rpm"
-            dest: "./{{ item }}-{{ clickhouse_version }}.rpm"
-          with_items: "{{ clickhouse_packages }}"
-      rescue:
-        - name: Get clickhouse distrib
-          ansible.builtin.get_url:
-            url: "https://packages.clickhouse.com/rpm/stable/clickhouse-common-static-{{ clickhouse_version }}.x86_64.rpm"
-            dest: "./clickhouse-common-static-{{ clickhouse_version }}.rpm"
+    - name: Install prerequisites
+      become: true
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: Add Clickhouse repository
+      become: true
+      ansible.builtin.apt_repository:
+        repo: "deb https://packages.clickhouse.com/deb stable main"
+        state: present
+        update_cache: yes
+        validate_certs: yes
+
     - name: Install clickhouse packages
       become: true
-      ansible.builtin.yum:
+      ansible.builtin.apt:
         name:
-          - clickhouse-common-static-{{ clickhouse_version }}.rpm
-          - clickhouse-client-{{ clickhouse_version }}.rpm
-          - clickhouse-server-{{ clickhouse_version }}.rpm
+          - clickhouse-client
+          - clickhouse-server
+          - clickhouse-common-static
+        state: present
+        update_cache: yes
+        allow_unauthenticated: yes
       notify: Start clickhouse service
+
     - name: Flush handlers
       meta: flush_handlers
+
+    - name: Wait for clickhouse to start
+      become: true
+      ansible.builtin.wait_for:
+        port: 8123
+        host: localhost
+        delay: 5
+        timeout: 60
+
     - name: Create database
-      ansible.builtin.command: "clickhouse-client -q 'create database logs;'"
+      become: true
+      ansible.builtin.command:
+        cmd: clickhouse-client -q 'CREATE DATABASE IF NOT EXISTS logs;'
       register: create_db
-      failed_when: create_db.rc != 0 and create_db.rc !=82
-      changed_when: create_db.rc == 0
+      changed_when: false
+      failed_when: false
+
+# Play 2: Установка и настройка Vector
+- name: Install and configure Vector
+  hosts: vector
+  vars:
+    vector_version: "0.21.1"
+  handlers:
+    - name: Restart vector service
+      become: true
+      ansible.builtin.systemd:
+        name: vector
+        state: restarted
+        daemon_reload: true
+  tasks:
+    - name: Create vector working directory
+      become: true
+      ansible.builtin.file:
+        path: /opt/vector
+        state: directory
+        mode: '0755'
+
+    - name: Download vector distribution
+      become: true
+      ansible.builtin.get_url:
+        url: "https://packages.timber.io/vector/{{ vector_version }}/vector-{{ vector_version }}-x86_64-unknown-linux-gnu.tar.gz"
+        dest: "/tmp/vector-{{ vector_version }}.tar.gz"
+        timeout: 300
+
+    - name: Extract vector archive
+      become: true
+      ansible.builtin.unarchive:
+        src: "/tmp/vector-{{ vector_version }}.tar.gz"
+        dest: /opt/vector
+        remote_src: true
+        creates: /opt/vector/vector-x86_64-unknown-linux-gnu/bin/vector
+
+    - name: Create symlink to vector binary
+      become: true
+      ansible.builtin.file:
+        src: "/opt/vector/vector-x86_64-unknown-linux-gnu/bin/vector"
+        dest: /usr/local/bin/vector
+        state: link
+
+    - name: Create vector config directory
+      become: true
+      ansible.builtin.file:
+        path: /etc/vector
+        state: directory
+        mode: '0755'
+
+    - name: Deploy vector configuration from template
+      become: true
+      ansible.builtin.template:
+        src: vector.yaml.j2
+        dest: /etc/vector/vector.yaml
+        mode: '0644'
+      notify: Restart vector service
+
+    - name: Create vector systemd service file
+      become: true
+      ansible.builtin.template:
+        src: vector.service.j2
+        dest: /etc/systemd/system/vector.service
+        mode: '0644'
+      notify: Restart vector service
+
+    - name: Ensure vector service is started and enabled
+      become: true
+      ansible.builtin.systemd:
+        name: vector
+        state: started
+        enabled: true
